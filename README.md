@@ -361,7 +361,7 @@ Yuadi sangat kesal dengan kebiasaan Irwandi yang suka mengubah atau bahkan mengh
 
 static const char *source_path = "/home/shared_files";
 
-// Fungsi bantu untuk mendapatkan path penuh
+
 void fullpath(char fpath[1024], const char *path) {
     snprintf(fpath, 1024, "%s%s", source_path, path);
 }
@@ -462,6 +462,69 @@ int main(int argc, char *argv[]) {
 }
 ```
 #### penjelasan :
+## Penjelasan Per Fungsi
+
+1. `#define FUSE_USE_VERSION 28`  
+   Menentukan bahwa program menggunakan API FUSE versi 2.8. Ini harus ditulis sebelum mengimpor `fuse.h`.
+
+2. `static const char *source_path = "/home/shared_files";`  
+   Variabel global yang menentukan direktori sumber di mana semua file dan folder fisik sebenarnya berada. Semua path dari FUSE akan digabungkan dengan direktori ini.
+
+3. `void fullpath(char fpath[1024], const char *path)`  
+   Fungsi bantu untuk membuat path absolut dari path FUSE.  
+   Contoh: jika path adalah `/a.txt`, maka fungsi ini akan menghasilkan `/home/shared_files/a.txt`.
+
+4. `int xmp_getattr(const char *path, struct stat *stbuf)`  
+   Dipanggil saat sistem atau user meminta metadata file, seperti ukuran, waktu modifikasi, mode, dan sebagainya.  
+   Fungsi ini akan:
+   - Membuat path lengkap menggunakan `fullpath`
+   - Memanggil `lstat()` pada file tersebut untuk mengisi struktur `stbuf`
+   - Jika gagal, mengembalikan nilai negatif dari `errno`
+
+5. `int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi)`  
+   Dipanggil ketika isi direktori diminta, seperti saat menggunakan `ls`.  
+   Fungsi ini akan:
+   - Membuat path lengkap ke direktori
+   - Membuka direktori menggunakan `opendir`
+   - Iterasi setiap entri direktori dengan `readdir`
+   - Mengisi buffer `buf` menggunakan `filler`
+
+6. `int xmp_open(const char *path, struct fuse_file_info *fi)`  
+   Dipanggil saat user mencoba membuka file.  
+   Fungsi ini hanya membuka file dalam mode read-only (`O_RDONLY`).  
+   File akan dibuka untuk dicek, lalu ditutup kembali karena FUSE mengelola file descriptor-nya.
+
+7. `int xmp_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)`  
+   Dipanggil saat user membaca isi file.  
+   Fungsi ini akan membuka file dengan `O_RDONLY`, membaca `size` byte dari posisi `offset` menggunakan `pread`, lalu menutup file.  
+   Hasil baca dikembalikan atau error jika gagal.
+
+8. `int deny_write_ops()`  
+   Fungsi umum yang dipanggil oleh semua operasi tulis seperti `write`, `mkdir`, `unlink`, `rename`, dan lainnya.  
+   Fungsi ini akan:
+   - Mengambil UID user menggunakan `fuse_get_context()->uid`
+   - Mencetak log UID ke `stderr`
+   - Mengembalikan error `-EROFS` (read-only filesystem)
+
+9. Fungsi tulis berikut akan langsung gagal karena memanggil `deny_write_ops()`:
+   - `xmp_mkdir`: untuk membuat direktori
+   - `xmp_rmdir`: untuk menghapus direktori
+   - `xmp_rename`: untuk mengganti nama file atau folder
+   - `xmp_write`: untuk menulis data ke file
+   - `xmp_unlink`: untuk menghapus file
+   - `xmp_create`: untuk membuat file baru
+   - `xmp_truncate`: untuk mengubah ukuran file
+
+10. `static struct fuse_operations xmp_oper`  
+    Struktur ini berisi daftar fungsi yang digunakan FUSE untuk menangani setiap operasi.  
+    Fungsi baca seperti `getattr`, `readdir`, `open`, dan `read` diaktifkan.  
+    Fungsi tulis diarahkan ke `deny_write_ops()` sehingga ditolak.
+
+11. `int main(int argc, char *argv[])`  
+    Fungsi utama program.  
+    - `umask(0)` agar file permission tidak dibatasi
+    - `fuse_main()` akan menjalankan filesystem virtual berdasarkan fungsi yang didefinisikan
+
 
 #### screenshot output :
 ![alt](https://github.com/Maleka0809/praktikum_4_sisop_screenshot/blob/243eaec579833f8245e75ab98f5129c57c729e5f/Screenshot%202025-06-18%20173242.png)
@@ -472,6 +535,8 @@ Meski ingin melindungi jawaban praktikumnya, Yuadi tetap ingin berbagi materi ku
 
 Setiap user (termasuk `yuadi`, `irwandi`, atau lainnya) harus dapat **membaca** konten dari file apapun di dalam folder `public`. Misalnya, `cat /mnt/secure_fs/public/materi_kuliah.txt` harus berfungsi untuk `yuadi` dan `irwandi`.
 
+#### penjelasan :
+sama seperti kode yang c, karena untuk soal yang c command cat tetap diperbolehkan
 
 #### screenshot :
 ![alt](https://github.com/Maleka0809/praktikum_4_sisop_screenshot/blob/ea3e11c1e167356084f0bf1a2179941f2b7f3b3e/Screenshot%202025-06-18%20174409.png)
@@ -510,7 +575,7 @@ void tolower_str(char *dest, const char *src) {
     dest[strlen(src)] = '\0';
 }
 
-// Gabungkan path FUSE dengan path sumber
+
 void fullpath(char fpath[1024], const char *path) {
     snprintf(fpath, 1024, "%s%s", source_path, path);
 }
@@ -665,6 +730,72 @@ int main(int argc, char *argv[]) {
     return fuse_main(argc, argv, &xmp_oper, NULL);
 }
 ```
+
+#### penjelasan :
+# FUSE Protected Filesystem
+
+Program ini adalah implementasi filesystem virtual menggunakan FUSE (Filesystem in Userspace). Sistem ini mengatur izin akses file berdasarkan UID pengguna dan mencegah akses file tertentu seperti file "jawaban" oleh pengguna yang tidak berwenang.
+
+### Struktur Direktori Sumber
+
+Semua file yang diakses berasal dari direktori fisik berikut:
+
+```
+/home/shared_files
+```
+
+### Fitur Utama
+
+- Semua path akan diarahkan ke `/home/shared_files`.
+- User `uid=1001` hanya boleh menulis di `/private_yuadi`.
+- User `uid=1002` hanya boleh menulis di `/private_irwandi`.
+- File yang mengandung kata `jawaban` di folder orang lain tidak bisa dibaca atau dibuka.
+- File system bersifat read-only untuk user lain di luar pemilik folder masing-masing.
+- Operasi seperti `rename`, `truncate`, dan `unlink` dibatasi.
+
+### Penjelasan Fungsi
+
+1. **tolower_str**  
+   Mengubah semua huruf dalam string menjadi lowercase untuk membandingkan nama file secara tidak sensitif huruf besar kecil.
+
+2. **fullpath**  
+   Menggabungkan path dari FUSE dengan direktori sumber fisik (`/home/shared_files`) untuk mendapatkan path absolut file.  
+   Contoh: `/private_yuadi/a.txt` → `/home/shared_files/private_yuadi/a.txt`
+
+3. **is_write_denied**  
+   Memeriksa apakah user saat ini memiliki izin untuk melakukan operasi tulis di direktori tertentu berdasarkan UID dan path.
+
+4. **is_jawaban_protected**  
+   Mencegah user mengakses file yang mengandung kata "jawaban" pada folder milik orang lain (berdasarkan UID).
+
+5. **xmp_getattr**  
+   Mengambil atribut file menggunakan `lstat` pada path hasil `fullpath`.
+
+6. **xmp_readdir**  
+   Membaca isi direktori dan mengisi hasilnya ke buffer FUSE menggunakan `filler`.
+
+7. **xmp_open**  
+   Membuka file jika tidak dilindungi oleh aturan `jawaban`. Hanya mengizinkan mode baca.
+
+8. **xmp_read**  
+   Membaca isi file menggunakan `pread`. Ditolak jika termasuk file `jawaban` yang tidak boleh diakses user.
+
+9. **xmp_write, xmp_unlink, xmp_truncate, xmp_rename, xmp_rmdir**  
+   Operasi-operasi ini hanya diperbolehkan untuk user yang memiliki akses sesuai direktori privatnya. Jika tidak, maka ditolak (`-EROFS`).
+
+10. **xmp_create**  
+    Membuat file hanya jika:
+    - User adalah `uid=1001` dan path di `/private_yuadi`, atau
+    - User adalah `uid=1002` dan path di `/private_irwandi`
+
+11. **xmp_mkdir**  
+    Membuat direktori baru di dalam folder privat masing-masing.
+
+12. **struct fuse_operations**  
+    Struktur ini mengatur handler untuk operasi-operasi yang dijalankan FUSE, seperti `getattr`, `readdir`, `read`, `write`, dll.
+
+13. **main**  
+    Menjalankan filesystem menggunakan `fuse_main()` dan menetapkan `umask(0)` agar file memiliki permission default penuh dari sistem.
 
 #### screenshot :
 ![alt](https://github.com/Maleka0809/praktikum_4_sisop_screenshot/blob/486519382c363e27fdac6bb9741263ff1c2300f3/Screenshot%202025-06-18%20193424.png)
