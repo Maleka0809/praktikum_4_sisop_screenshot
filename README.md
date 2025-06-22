@@ -575,9 +575,20 @@ void tolower_str(char *dest, const char *src) {
     dest[strlen(src)] = '\0';
 }
 
-
 void fullpath(char fpath[1024], const char *path) {
     snprintf(fpath, 1024, "%s%s", source_path, path);
+}
+
+// Cek apakah user mencoba mengakses direktori private orang lain
+int is_access_denied(const char *path) {
+    uid_t uid = fuse_get_context()->uid;
+
+    if (uid == 1001 && strncmp(path, "/private_irwandi/", 17) == 0)
+        return 1;
+    if (uid == 1002 && strncmp(path, "/private_yuadi/", 15) == 0)
+        return 1;
+
+    return 0;
 }
 
 // Cek apakah penulisan ditolak berdasarkan UID dan path
@@ -591,22 +602,9 @@ int is_write_denied(const char *path) {
     return 1; // Ditolak
 }
 
-// Cegah akses file 'jawaban' di direktori orang lain
-int is_jawaban_protected(const char *path) {
-    uid_t uid = fuse_get_context()->uid;
-    char lower[1024];
-    tolower_str(lower, path);
-
-    if (strstr(lower, "/private_yuadi/") == lower && strstr(lower, "jawaban") && uid != 1001)
-        return 1;
-    if (strstr(lower, "/private_irwandi/") == lower && strstr(lower, "jawaban") && uid != 1002)
-        return 1;
-    return 0;
-}
-
-
-
 static int xmp_getattr(const char *path, struct stat *stbuf) {
+    if (is_access_denied(path)) return -EACCES;
+
     char fpath[1024];
     fullpath(fpath, path);
     int res = lstat(fpath, stbuf);
@@ -615,6 +613,8 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
 
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi) {
+    if (is_access_denied(path)) return -EACCES;
+
     DIR *dp;
     struct dirent *de;
     char fpath[1024];
@@ -638,7 +638,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 }
 
 static int xmp_open(const char *path, struct fuse_file_info *fi) {
-    if (is_jawaban_protected(path)) return -EACCES;
+    if (is_access_denied(path)) return -EACCES;
 
     char fpath[1024];
     fullpath(fpath, path);
@@ -648,7 +648,7 @@ static int xmp_open(const char *path, struct fuse_file_info *fi) {
 
 static int xmp_read(const char *path, char *buf, size_t size,
                     off_t offset, struct fuse_file_info *fi) {
-    if (is_jawaban_protected(path)) return -EACCES;
+    if (is_access_denied(path)) return -EACCES;
 
     char fpath[1024];
     fullpath(fpath, path);
@@ -729,73 +729,78 @@ int main(int argc, char *argv[]) {
     umask(0);
     return fuse_main(argc, argv, &xmp_oper, NULL);
 }
+
 ```
 
 #### penjelasan :
-# FUSE Protected Filesystem
+Fungsi Utama
 
-Program ini adalah implementasi filesystem virtual menggunakan FUSE (Filesystem in Userspace). Sistem ini mengatur izin akses file berdasarkan UID pengguna dan mencegah akses file tertentu seperti file "jawaban" oleh pengguna yang tidak berwenang.
+tolower_str(char *dest, const char *src)
+Konversi string src menjadi huruf kecil, disalin ke dest.
 
-### Struktur Direktori Sumber
+fullpath(char fpath[1024], const char *path)
+Membentuk path absolut ke folder sumber (/home/shared_files) dari path relatif FUSE.
 
-Semua file yang diakses berasal dari direktori fisik berikut:
+Contoh:
+- path = "/test.txt" → fpath = "/home/shared_files/test.txt"
 
-```
-/home/shared_files
-```
+is_access_denied(const char *path)
+Memblokir user:
+- UID 1001 (yuadi) dari mengakses /private_irwandi/
+- UID 1002 (irwandi) dari mengakses /private_yuadi/
 
-### Fitur Utama
+Mengembalikan:
+- 1 jika akses ditolak
+- 0 jika diizinkan
 
-- Semua path akan diarahkan ke `/home/shared_files`.
-- User `uid=1001` hanya boleh menulis di `/private_yuadi`.
-- User `uid=1002` hanya boleh menulis di `/private_irwandi`.
-- File yang mengandung kata `jawaban` di folder orang lain tidak bisa dibaca atau dibuka.
-- File system bersifat read-only untuk user lain di luar pemilik folder masing-masing.
-- Operasi seperti `rename`, `truncate`, dan `unlink` dibatasi.
+is_write_denied(const char *path)
+Mencegah semua user menulis, kecuali:
+- UID 1001 boleh menulis ke /private_yuadi/
+- UID 1002 boleh menulis ke /private_irwandi/
 
-### Penjelasan Fungsi
+Implementasi FUSE
 
-1. **tolower_str**  
-   Mengubah semua huruf dalam string menjadi lowercase untuk membandingkan nama file secara tidak sensitif huruf besar kecil.
+xmp_getattr
+Mengambil atribut file (mirip stat/ls -l). Menolak jika akses ke direktori terlarang.
 
-2. **fullpath**  
-   Menggabungkan path dari FUSE dengan direktori sumber fisik (`/home/shared_files`) untuk mendapatkan path absolut file.  
-   Contoh: `/private_yuadi/a.txt` → `/home/shared_files/private_yuadi/a.txt`
+xmp_readdir
+Menampilkan isi direktori (ls). Ditolak jika direktori privat milik user lain.
 
-3. **is_write_denied**  
-   Memeriksa apakah user saat ini memiliki izin untuk melakukan operasi tulis di direktori tertentu berdasarkan UID dan path.
+xmp_open
+Membuka file dalam mode read-only. Ditolak jika akses ke direktori privat orang lain.
 
-4. **is_jawaban_protected**  
-   Mencegah user mengakses file yang mengandung kata "jawaban" pada folder milik orang lain (berdasarkan UID).
+xmp_read
+Membaca isi file. Ditolak jika file berada di direktori privat orang lain.
 
-5. **xmp_getattr**  
-   Mengambil atribut file menggunakan `lstat` pada path hasil `fullpath`.
+xmp_write
+Selalu ditolak (-EROFS) kecuali jika user punya izin menulis berdasarkan is_write_denied.
 
-6. **xmp_readdir**  
-   Membaca isi direktori dan mengisi hasilnya ke buffer FUSE menggunakan `filler`.
+xmp_unlink
+Menghapus file. Ditolak kecuali oleh user yang sesuai di direktori privatnya.
 
-7. **xmp_open**  
-   Membuka file jika tidak dilindungi oleh aturan `jawaban`. Hanya mengizinkan mode baca.
+xmp_create
+Membuat file baru. Hanya diizinkan untuk:
+- yuadi → /private_yuadi/
+- irwandi → /private_irwandi/
 
-8. **xmp_read**  
-   Membaca isi file menggunakan `pread`. Ditolak jika termasuk file `jawaban` yang tidak boleh diakses user.
+xmp_truncate
+Memotong isi file. Diizinkan hanya jika user punya hak menulis di folder privatnya.
 
-9. **xmp_write, xmp_unlink, xmp_truncate, xmp_rename, xmp_rmdir**  
-   Operasi-operasi ini hanya diperbolehkan untuk user yang memiliki akses sesuai direktori privatnya. Jika tidak, maka ditolak (`-EROFS`).
+xmp_rename
+Selalu ditolak. Sistem bersifat read-only terkait operasi rename.
 
-10. **xmp_create**  
-    Membuat file hanya jika:
-    - User adalah `uid=1001` dan path di `/private_yuadi`, atau
-    - User adalah `uid=1002` dan path di `/private_irwandi`
+xmp_mkdir
+Membuat folder baru. Hanya diizinkan di folder privat masing-masing user.
 
-11. **xmp_mkdir**  
-    Membuat direktori baru di dalam folder privat masing-masing.
+xmp_rmdir
+Menghapus folder. Hanya diizinkan jika punya hak tulis.
 
-12. **struct fuse_operations**  
-    Struktur ini mengatur handler untuk operasi-operasi yang dijalankan FUSE, seperti `getattr`, `readdir`, `read`, `write`, dll.
+main
+Menjalankan FUSE dengan:
+- umask(0) agar tidak mengubah mode file asli
+- fuse_main(...) dengan operasi yang sudah didefinisikan.
 
-13. **main**  
-    Menjalankan filesystem menggunakan `fuse_main()` dan menetapkan `umask(0)` agar file memiliki permission default penuh dari sistem.
+
 
 #### screenshot :
 ![alt](https://github.com/Maleka0809/praktikum_4_sisop_screenshot/blob/486519382c363e27fdac6bb9741263ff1c2300f3/Screenshot%202025-06-18%20193424.png)
@@ -826,8 +831,4 @@ Dengan sistem ini, kedua mahasiswa akhirnya bisa belajar dengan tenang. Yuadi bi
 - Fokus pada implementasi operasi FUSE yang berkaitan dengan **membaca** dan **menolak** operasi write/modify. Anda perlu memeriksa **UID** dari user yang mengakses di dalam operasi FUSE Anda untuk menerapkan pembatasan private folder.
 
 ---
-
-# FUSecure
-
-Yuadi is a brilliant developer working on a top-secret project. Unfortunately, his overly curious friend Irwandi has a bad habit of copying Yuadi's operating system practicum answers without permission whenever deadlines approach. Despite multiple warnings and even being reprimanded by teaching assistants for frequent plagiarism, Irwandi just can't resist peeking at and copying Yuadi's practicum solutions. Feeling frustrated that his achievements were constantly being stolen and his integrity was at stake, Yuadi, an expert in data security, decided to take matters into his own hands by creating FUSecure, a FUSE-based file system that enforces read-only access and restricts file visibility based on user permissions.
 
